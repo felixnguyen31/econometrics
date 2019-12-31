@@ -1,0 +1,194 @@
+---
+title: "Problem Set 4"
+author: "Felix Nguyen"
+date: "December 16, 2019"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Question 1
+
+Read the data
+
+```{r reading}
+library(tidyverse)
+state <- read.csv('PS2_state_space.csv')
+F1 <- read.csv('PS2_transition_a1.csv')
+F0 <- read.csv('PS2_transition_a0.csv')
+sim <- read.csv('PS2_simdata.csv')
+C <- as.numeric(state$C)
+I <- as.numeric(state$I)
+P <- as.numeric(state$P)
+
+F1 <- as.matrix(F1[,3:70])
+F0 <- as.matrix(F0[,3:70])
+```
+
+
+Setting up the global parameters
+
+```{r para}
+n <- nrow(state)
+alpha <- 2
+lambda <- -3
+beta <- 0.99
+ibar <- 4
+ps <- 0.5
+pr <- 2
+c <- 0.25
+gamma <- 0.5
+euler <- -digamma(1)
+```
+
+Choice specific value function:
+
+```{r choiceval}
+
+choice_val <- function(EV){
+  U1 <- alpha*C - P
+  U0 <- rep(0, n)
+  for(i in 1:n){
+    indi <- as.numeric(C[i] > 0)
+    U0[i] <- ifelse(I[i] == 0, lambda*indi, alpha*C[i])
+  }
+  V0 <- U0 + beta*F0%*%EV
+  V1 <- U1 + beta*F1%*%EV
+  V <- cbind(V1, V0)
+  return(V)
+}
+
+```
+
+The expected value function:
+
+```{r emax}
+
+emax <- function(EV0){
+  val <- choice_val(EV0)
+  EV1 <- log(rowSums(exp(val))) + euler
+  return(EV1)
+}
+
+```
+
+Finally, the contraction mapping:
+
+```{r contraction}
+contraction <- function(threshold){
+  k <- 0
+  EV <- matrix(0,n,1)
+  EV_new <- emax(EV)
+  
+  while(max(abs(EV_new-EV)) > threshold){
+    EV <- EV_new
+    EV_new <- emax(EV) #Vbar(s) = E(V(s,epsilon))
+    k <- k +1
+  }
+  cat('Converged after ',k, 'iterations')
+  return(EV_new)
+}
+```
+
+Getting the expected value function and tabulate:
+
+```{r ev}
+EV_true <- contraction(1e-10)
+
+tab1 <- cbind(state,EV_true)
+print(tab1)
+```
+
+## Problem 2
+
+Calculating the CCP vector ($\hat{P}(s)$):
+
+```{r p-vec}
+Phat <- sim %>% group_by(state_id) %>%
+  summarise(Pr = sum(choice)/n()) %>% .$Pr
+
+Phat[Phat<0.001] <- 0.001 #Putting constraint 0.001 <= P <= .999
+
+Phat[Phat>0.999] <- 0.999
+
+```
+
+Next, the CCP Mapping function:
+
+```{r ccp}
+CCP <- function(PR){
+  U1 <- alpha*C - P
+  U0 <- rep(0, n)
+  for(i in 1:n){
+    indi <- as.numeric(C[i] > 0)
+    U0[i] <- ifelse(I[i] == 0, lambda*indi, alpha*C[i])
+  }
+  E1 <- euler - log(PR)
+  E0 <- euler - log(1-PR)
+  F_b <- F0*(1-PR) + F1*PR
+  EU <- (1-PR)*(U0 + E0) + PR*(U1 + E1)
+  EVP <- solve(as.matrix(diag(n)-beta*F_b))%*%EU
+  val <- choice_val(EVP)
+  Prb <- exp(val[,1])/rowSums(exp(val))
+  return(list(EVP, Prb))
+}
+
+```
+
+Calculate the value function and tabulate:
+
+```{r evp}
+EV_P <- CCP(Phat)[[1]]
+Diff <- EV_P - EV_true
+tab2 <- cbind(tab1, EV_P, Diff)
+print(tab2)
+
+```
+
+## Problem 4
+
+NXFP likelihood function
+
+```{r nxfp}
+
+Y <- sim$choice #Choice vector
+
+loglike <- function(params){
+  alpha <<- params[1]
+  lambda <<- params[2]
+  it <- 0
+  eps <- 1e-10
+  vCCP <- Phat
+  vCCP0 <- rep(0,n)
+  while(max(abs(vCCP0 - vCCP)) > eps){
+    vCCP0 <- vCCP
+    vCCP <- CCP(vCCP0)[[2]]
+    it <- it + 1
+  }
+  vCCP1 <- rep(0, length(sim$state_id))
+  for(j in 1:length(sim$state_id)){
+    vCCP1[j] <- vCCP[sim$state_id[j]+1]
+  }
+  L <- vCCP1*Y + (1-vCCP1)*(1-Y)
+  LLF <- sum(log(L))/1000
+  return(LLF)
+}
+
+```
+
+Maximizing the log-likelihood:
+
+```{r optim}
+
+bounds = c(-10, 10) # Reasonable bound for faster optimization
+fit <- optim(par = rep(0.1,2), fn = loglike, method=c("L-BFGS-B"),
+             lower=bounds[1],upper=bounds[2],control=list(fnscale=-1)) #-1 to Maximize
+fit
+cat('alpha is', fit$par[1])
+cat(' lambda is', fit$par[2])
+```
